@@ -79,11 +79,11 @@ spec:
 ---
 # api-backend runs on the stock node:22-alpine image — no custom Dockerfile,
 # no registry. Its code lives entirely on the api-backend-code PVC (see
-# pvc.yaml) and is pushed with `scripts/deploy-backend.sh` (kubectl cp), not
-# baked into an image. The command below waits for that code to show up on
-# first deploy, then hands off to nodemon, which restarts the `node`
-# process — not this container — both on a crash and whenever new code is
-# pushed. That's why ordinary code pushes never show up as a pod restart.
+# pvc.yaml) and is pushed with `kubectl cp`, not baked into an image. The
+# command below waits for that code to show up on first deploy, then hands
+# off to nodemon, which restarts the `node` process — not this container —
+# both on a crash and whenever new code is pushed. That's why ordinary code
+# pushes never show up as a pod restart.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -114,7 +114,7 @@ spec:
             - -c
             - |
               until [ -f /app/index.js ]; do
-                echo "waiting for code at /app (run scripts/deploy-backend.sh)..."
+                echo "waiting for code at /app (kubectl cp your backend dir onto this pod's /app)..."
                 sleep 3
               done
               exec /app/node_modules/.bin/nodemon --watch /app --ext js /app/index.js

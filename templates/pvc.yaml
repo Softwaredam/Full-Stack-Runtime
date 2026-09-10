@@ -18,9 +18,9 @@ spec:
 ---
 # Holds the API backend's code + node_modules. There's no custom image for
 # this app — the Deployment below runs stock node:22-alpine and this PVC is
-# where `scripts/deploy-backend.sh` (kubectl cp) actually puts the code, so
-# it survives pod restarts/rescheduling the same way the frontend PVC above
-# does for the static site.
+# where `kubectl cp` actually puts the code, so it survives pod
+# restarts/rescheduling the same way the frontend PVC above does for the
+# static site.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
