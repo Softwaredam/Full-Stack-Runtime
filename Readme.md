@@ -443,11 +443,83 @@ wins over `/` for anything under the API prefix.
   must implement `GET /api/health` returning 2xx, or the pod never becomes
   Ready and the Service never sends it traffic (the container keeps
   running regardless; only routing is affected).
-- **No compiled/native backend dependencies.** See **Why this shape** — a
-  `node_modules` built on your dev machine must run unmodified on Linux.
+- **No compiled/native backend dependencies — and this cuts along three
+  axes, not one.** `kubectl cp`-ing `node_modules` onto the pod only works
+  if what you copy runs unmodified there, which means matching all three
+  of:
+  - **OS** — Linux, not macOS or Windows;
+  - **CPU architecture** — the *cluster node's*, not your laptop's (check
+    with `kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}'`);
+  - **libc** — this chart's backend image is `node:*-alpine`, i.e.
+    **musl**, not the glibc most native npm prebuilts are actually built
+    against, even when the OS and CPU architecture already match.
+
+  Plain JavaScript dependencies are unaffected by all three — they're just
+  text, interpreted by whichever Node binary happens to be running in the
+  pod, so an ARM laptop pushing onto an x86 cluster (or the reverse) works
+  identically. A dependency with a compiled `.node` addon (`bcrypt`,
+  `sharp`, `sqlite3`, native DB drivers, etc.) is built or fetched as a
+  prebuilt binary **for the machine that ran `npm install`** — copy that
+  onto a pod with a different architecture, OS, or libc and it fails to
+  load (`invalid ELF header`, missing `GLIBC_*` symbols), regardless of
+  which direction the mismatch runs. If a native dependency is genuinely
+  required, build `node_modules` targeting the cluster's actual
+  OS+arch+libc rather than your local machine's — e.g.
+  `docker run --rm --platform linux/<cluster-arch> -v "$PWD":/app -w /app node:22-alpine npm ci`
+  — never a plain local `npm install`. See **When you need a real pipeline
+  instead** below for the point at which working around this stops being
+  worth it.
 - **First deploy (or a from-scratch PVC) needs a manual `kubectl cp`.**
   `helm install` alone leaves both PVCs empty; nothing serves real content
   until step 4 of the Quickstart runs once.
+
+## When you need a real pipeline instead
+
+Everything in this README describes a deliberately minimal deploy path —
+well suited to demos, prototypes, internal tools, and early-stage apps
+where speed of iteration matters more than release guarantees. It is
+**not** a replacement for a real CI/CD pipeline building, testing, and
+publishing your own container images, and this architecture should be
+graduated away from once any of the following start to matter:
+
+- **Reproducible, auditable releases.** `kubectl cp` deploys whatever
+  happens to be on a laptop (or an agent's checkout) at that moment —
+  there's no artifact to point to later and say "this exact thing is what
+  shipped," no build log, no diff between what was tested and what was
+  actually deployed.
+- **Tests that actually gate a release.** Nothing in this runtime runs a
+  test suite before code reaches a pod. A pipeline that builds an image,
+  runs tests against *that image*, and only then allows it to be deployed
+  catches regressions before users do — `kubectl cp` catches them after, if
+  at all.
+- **Native/compiled dependencies, or anything beyond Node.js.** See
+  **Trade-offs & constraints** above — the correct fix is a real image
+  build targeting the cluster's actual OS/arch/libc (ideally the same CI
+  that runs the tests), not an increasingly elaborate `kubectl cp`
+  workaround.
+- **More than one replica per component, or zero-downtime deploys.** This
+  runtime's `ReadWriteOnce` PVC + `Recreate` strategy caps each component
+  at one pod, with a restart gap on every rollout (see **Persistence &
+  lifecycle**). Real horizontal scaling and rolling updates require each
+  pod to carry its own copy of the code — which means an image, not a
+  shared volume.
+- **Rollback.** Reverting a bad `kubectl cp` means re-copying an older
+  build you happened to keep around locally. Reverting a bad image deploy
+  is `kubectl set image ... image=<previous-tag>` — a rollback story that
+  doesn't depend on anyone's laptop still having the right files.
+- **Compliance, multi-person teams, or "who deployed what, when."** A
+  registry, image tags, and a pipeline run give you that trail for free.
+  `kubectl cp` gives you `kubectl exec ... -- ls -la /app` and whoever
+  remembers running the command.
+
+None of this means the immutable-runtime/mutable-app split described in
+this README is the wrong idea — it means this chart's specific *deploy
+mechanism* (`kubectl cp` onto stock images) is a starting point, not a
+permanent end state. A natural evolution is to keep this chart's
+Deployment/Service/Ingress/PVC shape but point `frontend.image`/
+`backend.image` at your own built-and-tested images once they exist, and
+retire the PVC-as-code-volume + `nodemon` pattern in favor of whatever a
+real pipeline is already doing.
 
 ## Adopting existing resources into a release
 
