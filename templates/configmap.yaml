@@ -1,0 +1,21 @@
+{{- if .Values.frontend.env }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-extra-env
+data:
+  {{- range $key, $value := .Values.frontend.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-conf
+data:
+  # tpl'd so files/default.conf can reference .Values (e.g. server_name).
+  default.conf: |-
+{{ tpl (.Files.Get "files/default.conf") . | indent 4 }}
+  security-headers.conf: |-
+{{ .Files.Get "files/security-headers.conf" | indent 4 }}

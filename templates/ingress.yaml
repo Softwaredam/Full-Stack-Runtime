@@ -1,0 +1,81 @@
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-redirect-ingress-to-https
+  annotations:
+    #instructs Traefik to listen on http (80)
+    traefik.ingress.kubernetes.io/router.entrypoints: {{ .Values.ingress.httpEntrypoint }}
+
+    #force-https refers to the Middleware defined below, in this release's namespace.
+    traefik.ingress.kubernetes.io/router.middlewares: {{.Release.Namespace}}-force-https@kubernetescrd
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+  - host: {{ .Values.ingress.host }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ .Values.frontend.name }}-service
+            port:
+              number: {{ .Values.frontend.servicePort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-ingress
+  annotations:
+    {{- if .Values.ingress.tls.enabled }}
+    #we use cert-manager to issue a let's encrypt certificate
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.tls.clusterIssuer }}
+    {{- end }}
+
+    #instructs Traefik to use https/443 (websecure)
+    traefik.ingress.kubernetes.io/router.entrypoints: {{ .Values.ingress.httpsEntrypoint }}
+
+
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+      - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+  - host: {{ .Values.ingress.host }}
+    http:
+      paths:
+      # More specific prefix first for readability — Traefik matches the
+      # longest prefix regardless of list order, so /api always wins over /
+      # for anything under /api.
+      {{- if .Values.backend.enabled }}
+      - path: {{ .Values.backend.apiPathPrefix }}
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ .Values.backend.name }}
+            port:
+              number: {{ .Values.backend.servicePort }}
+      {{- end }}
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ .Values.frontend.name }}-service
+            port:
+              number: {{ .Values.frontend.servicePort }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: force-https
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---

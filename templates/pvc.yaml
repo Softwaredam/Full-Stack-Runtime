@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.frontend.name }}
+  annotations:
+    # Keep this PVC (and its content) around across `helm uninstall` /
+    # `helm delete` — losing the frontend's deployed build or the backend's
+    # code+node_modules would mean re-pushing everything via kubectl cp.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.frontend.persistence.size }}
+  storageClassName: {{ .Values.frontend.persistence.storageClassName }}
+{{- if .Values.backend.enabled }}
+---
+# Holds the API backend's code + node_modules. There's no custom image for
+# this app — the Deployment below runs stock node:22-alpine and this PVC is
+# where `scripts/deploy-backend.sh` (kubectl cp) actually puts the code, so
+# it survives pod restarts/rescheduling the same way the frontend PVC above
+# does for the static site.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.backend.name }}-code
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.backend.persistence.size }}
+  storageClassName: {{ .Values.backend.persistence.storageClassName }}
+{{- end }}

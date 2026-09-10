@@ -1,0 +1,9 @@
+apiVersion: v2
+name: full-stack-runtime
+description: >-
+  A runtime environment for the complete application stack — frontend and
+  API/backend — with PostgreSQL assumed to be provided externally. The
+  runtime is immutable, while the application can be built and deployed
+  independently without rebuilding or publishing a new container image.
+  Immutable runtime, mutable app.
+version: 0.0.1 #semVer

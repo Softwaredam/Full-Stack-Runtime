@@ -1,0 +1,172 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.frontend.name }}
+  labels:
+    app: {{ .Values.frontend.name }}
+    anotherLabel: example
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  strategy:
+    type: Recreate # the PVC is ReadWriteOnce — a rolling update would deadlock
+                    # trying to attach it to a second pod before the first releases it
+  selector:
+    # `spec.selector` is immutable on an existing Deployment — the API server
+    # rejects any change to it. `anotherLabel` is leftover from the example
+    # chart this was built on top of and does nothing useful, but it must
+    # stay here (and on the pod template below) to match the live selector;
+    # removing it would require deleting and recreating the Deployment.
+    matchLabels: # these labels are used by a Service (load balancer) to find a matching pod
+      app: {{ .Values.frontend.name }}
+      anotherLabel: example
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.frontend.name }}
+        anotherLabel: example
+      annotations:
+        #checksum/config: {{ tpl (toYaml .Values) . | sha256sum }} will create a different checksum if the values/config are changed. This annotation change will force the deployment to create another pod will will use the new changed variables.
+
+        checksum/config: {{ tpl (toYaml .Values) . | sha256sum }}
+        # Also roll the pod when the nginx config itself changes — a plain
+        # ConfigMap volume mount doesn't get live-reloaded inside a running
+        # container on its own.
+        checksum/frontend-conf: {{ printf "%s%s" (tpl (.Files.Get "files/default.conf") .) (.Files.Get "files/security-headers.conf") | sha256sum }}
+    spec:
+      securityContext:
+          runAsUser: {{ .Values.frontend.securityContext.runAsUser }}
+          runAsGroup: {{ .Values.frontend.securityContext.runAsGroup }}
+          fsGroup: {{ .Values.frontend.securityContext.fsGroup }}
+          fsGroupChangePolicy: OnRootMismatch   # only chown if needed — faster on large volumes
+      containers:
+        - name: {{ .Values.frontend.name }}
+          image: {{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}
+          ports:
+            - containerPort: {{ .Values.frontend.containerPort }} #The unpriviliged nginx listens on this port instead of 80
+          resources:
+            requests: # << requests are the guaranteed lower-bound
+              cpu: {{ .Values.frontend.resources.requests.cpu }}
+              memory: {{ .Values.frontend.resources.requests.memory }}
+            limits: # << limits are the not-guaranteed upper-bound
+              cpu: {{ .Values.frontend.resources.limits.cpu }}
+              memory: {{ .Values.frontend.resources.limits.memory }}
+
+          {{- if .Values.frontend.env }}
+          # See the vars: kubectl exec -it $(kubectl get pods -lapp={{ .Values.frontend.name }} -oname) -- env
+          envFrom:
+            - configMapRef:
+                name: frontend-extra-env
+          {{- end }}
+
+          volumeMounts: #volumeMounts are used to mount a (defined volume underneath) in a container in a pod. The container sees it as a file
+            - mountPath: "/usr/share/nginx/html"
+              name: frontend
+            - name: frontend-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+            - name: frontend-conf
+              mountPath: /etc/nginx/snippets/security-headers.conf
+              subPath: security-headers.conf
+
+      volumes: #a volume is a reference to any kind of storage provider (interface). It can be a file server, block storage, or even secrets and configmaps of k8s where data resides.
+        - name: frontend
+          persistentVolumeClaim:
+            claimName: {{ .Values.frontend.name }}
+        - name: frontend-conf
+          configMap:
+            name: frontend-conf
+{{- if .Values.backend.enabled }}
+---
+# api-backend runs on the stock node:22-alpine image — no custom Dockerfile,
+# no registry. Its code lives entirely on the api-backend-code PVC (see
+# pvc.yaml) and is pushed with `scripts/deploy-backend.sh` (kubectl cp), not
+# baked into an image. The command below waits for that code to show up on
+# first deploy, then hands off to nodemon, which restarts the `node`
+# process — not this container — both on a crash and whenever new code is
+# pushed. That's why ordinary code pushes never show up as a pod restart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.backend.name }}
+  labels:
+    app: {{ .Values.backend.name }}
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  strategy:
+    type: Recreate # the PVC is ReadWriteOnce — never let two pods mount it at once
+  selector:
+    matchLabels:
+      app: {{ .Values.backend.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.backend.name }}
+    spec:
+      securityContext:
+        runAsUser: {{ .Values.backend.securityContext.runAsUser }} # the "node" user baked into the official image
+        runAsGroup: {{ .Values.backend.securityContext.runAsGroup }}
+        fsGroup: {{ .Values.backend.securityContext.fsGroup }}
+      containers:
+        - name: {{ .Values.backend.name }}
+          image: {{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}
+          command:
+            - sh
+            - -c
+            - |
+              until [ -f /app/index.js ]; do
+                echo "waiting for code at /app (run scripts/deploy-backend.sh)..."
+                sleep 3
+              done
+              exec /app/node_modules/.bin/nodemon --watch /app --ext js /app/index.js
+          ports:
+            - containerPort: {{ .Values.backend.containerPort }}
+          volumeMounts:
+            - name: api-backend-code
+              mountPath: /app
+          env:
+            - name: PORT
+              value: {{ .Values.backend.containerPort | quote }}
+            {{- if .Values.backend.postgres.enabled }}
+            - name: PGHOST
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.postgres.secretName }}, key: {{ .Values.backend.postgres.secretKeys.host }} } }
+            - name: PGPORT
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.postgres.secretName }}, key: {{ .Values.backend.postgres.secretKeys.port }} } }
+            - name: PGDATABASE
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.postgres.secretName }}, key: {{ .Values.backend.postgres.secretKeys.dbname }} } }
+            - name: PGUSER
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.postgres.secretName }}, key: {{ .Values.backend.postgres.secretKeys.username }} } }
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.backend.postgres.secretName }}, key: {{ .Values.backend.postgres.secretKeys.password }} } }
+            {{- end }}
+            # Optional: kubectl create secret generic {{ .Values.backend.adminSecretName }}
+            # --from-literal=username=... --from-literal=password=...
+            # Enables DELETE /api/reviews/:id; without it the pod still
+            # starts fine and that one endpoint just responds 503.
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.backend.adminSecretName }}, key: username, optional: true }
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.backend.adminSecretName }}, key: password, optional: true }
+          readinessProbe:
+            httpGet: { path: /api/health, port: {{ .Values.backend.containerPort }} }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 60 # tolerate the "waiting for code" bootstrap window
+          livenessProbe:
+            httpGet: { path: /api/health, port: {{ .Values.backend.containerPort }} }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: {{ .Values.backend.resources.requests.cpu }}
+              memory: {{ .Values.backend.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.backend.resources.limits.cpu }}
+              memory: {{ .Values.backend.resources.limits.memory }}
+      volumes:
+        - name: api-backend-code
+          persistentVolumeClaim:
+            claimName: {{ .Values.backend.name }}-code
+{{- end }}

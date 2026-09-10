@@ -1,0 +1,96 @@
+# Every cluster- or site-specific value lives here. To deploy this chart for
+# a different website, copy this file (or pass --set/-f overrides) and change
+# the values below — no template edits required.
+
+ingress:
+  # Public hostname this site is served on. Used by both the plain-HTTP
+  # redirect-to-https Ingress and the TLS Ingress, and by nginx's
+  # `server_name` (via files/default.conf, templated at deploy time).
+  host: no.container.softwaredam.nl
+  className: traefik
+  tls:
+    enabled: true
+    secretName: nginx-ingress-tls
+    # cert-manager ClusterIssuer used to obtain the certificate.
+    clusterIssuer: lets-encrypt
+  # Traefik entrypoint names — change only if the cluster's Traefik is
+  # configured with different entrypoint names than the defaults (web/websecure).
+  httpEntrypoint: web
+  httpsEntrypoint: websecure
+
+frontend:
+  # Base name used to derive the Deployment/PVC/Service/ConfigMap names and
+  # the `app` selector label. Change this if running more than one instance
+  # of this chart's frontend in the same namespace.
+  name: frontend
+  replicas: 1
+  image:
+    repository: nginxinc/nginx-unprivileged
+    tag: 1.29-alpine-perl
+  containerPort: 8080
+  servicePort: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 100Mi
+    limits:
+      cpu: 150m
+      memory: 200Mi
+  securityContext:
+    runAsUser: 101
+    runAsGroup: 101
+    fsGroup: 101
+  persistence:
+    size: 1Gi
+    storageClassName: retain-local
+  # Extra env vars for the frontend container, injected via a ConfigMap
+  # (key: value pairs, e.g. { SOME_TIMEOUT: "1001" }).
+  env: {}
+
+# The review API (Node/Express/pg). Set `backend.enabled: false` to deploy
+# just the static frontend for a site that has no such API.
+backend:
+  enabled: true
+  name: api-backend
+  apiPathPrefix: /api
+  replicas: 1
+  image:
+    repository: node
+    tag: 22-alpine
+  containerPort: 3000
+  servicePort: 3000
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  persistence:
+    size: 256Mi
+    storageClassName: retain-local
+  # Wires PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD into the backend
+  # container from an existing Secret — e.g. one provisioned by a
+  # CloudNativePG cluster or a separate Postgres Helm release, not this
+  # chart. Set `enabled: false` if the backend doesn't need Postgres at all,
+  # or you'd rather wire its DB connection yourself via `backend.env`.
+  postgres:
+    enabled: true
+    # Name of the existing Secret providing the connection details.
+    secretName: no-container-postgres-tst
+    # Keys inside that Secret. These match CloudNativePG's default
+    # connection Secret — override per key if yours uses different names.
+    secretKeys:
+      host: host
+      port: port
+      dbname: dbname
+      username: username
+      password: password
+  # Optional HTTP Basic Auth credentials for DELETE /api/reviews/:id. Leave
+  # unset (secret absent) and that one endpoint just responds 503; the rest
+  # of the API works fine without it.
+  adminSecretName: api-backend-admin
