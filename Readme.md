@@ -227,6 +227,142 @@ new env var, a resource limit, a different hostname, flipping
 Every ordinary feature/bugfix iteration on the app itself is a `kubectl cp`,
 live in seconds — no image build, no registry, no pipeline.
 
+## Guardrails (mandatory)
+
+These are non-negotiable rules for any application built on this runtime —
+for a human or an AI agent. The runtime makes it easy to reach for the
+wrong storage (an in-memory object, the code PVC), to skip auth on a fast
+demo, or to promote straight to production because a `kubectl cp` deploy
+feels cheap to redo — all of those are data-loss-, breach-, or
+outage-shaped mistakes, not style choices.
+
+### 1. Any state the user "registers" must live in a real datastore, not memory
+
+If a request causes the application to remember something — an upload, a
+submitted form, a review, a counter, a computed statistic, a session,
+anything a *different* request or a *restarted* process needs to see
+again — it must be written to:
+
+- **PostgreSQL** (wired via `backend.postgres.*` — already set up by this
+  chart) for structured/relational data, or
+- **S3-compatible object storage** (not provisioned by this chart — bring
+  your own bucket/credentials, e.g. AWS S3, MinIO, Cloudflare R2, and wire
+  them the same way Postgres is wired: an existing Secret consumed via
+  `secretKeyRef`/`backend.env`) for files and blobs.
+
+**In-memory storage (a JS variable, an in-process array/Map) is allowed
+only for cache** — data that is genuinely fine to lose at any moment,
+because:
+
+- `nodemon` restarts the Node process on every `kubectl cp` (see
+  **Iterating on a real app** above) — any in-memory state vanishes on
+  every ordinary code push, silently, with no warning to the user.
+- Pod eviction/rescheduling wipes it identically, and unlike the PVC-backed
+  code, there is no `Recreate`-strategy protection for what's sitting in a
+  running process's heap.
+
+Do not use the backend's code PVC (`/app`) as a substitute for a real
+datastore either. It's a single `ReadWriteOnce` volume, sized for code +
+`node_modules` (`backend.persistence.size`, default `256Mi`), mounted to
+exactly one pod, and overwritten by every `kubectl cp` — using it to also
+stash uploads or app data conflates two different lifecycles (redeploying
+code vs. persisting data) on one volume, with one size limit and no backup
+story of its own. If a feature needs file storage and no S3-compatible
+store is available yet, that's a "provision one first" situation, not a
+"put it on the code PVC" situation.
+
+### 2. Data input, data management, and auth/authz must be secured before being considered done
+
+Any endpoint that accepts input (`POST`/`PUT`/`PATCH`/`DELETE`), exposes
+management/admin operations, or touches authentication/authorization must
+not ship open. Concretely:
+
+- **Fail closed, not open.** If the credentials/secret a protected endpoint
+  needs aren't configured yet, the endpoint should refuse (e.g. `503`/`401`),
+  never silently allow the action. `backend.adminSecretName` models the
+  mechanics for this: it's wired as `optional: true` (`templates/deployment.yaml`,
+  `ADMIN_USER`/`ADMIN_PASSWORD`), so the chart deploys fine with the Secret
+  absent — but that only works safely if *your application code* treats a
+  missing `ADMIN_USER`/`ADMIN_PASSWORD` as "refuse this action," not
+  "skip the check."
+- **Secrets go in a Kubernetes Secret, never in code.** Code pushed via
+  `kubectl cp` lands unencrypted on a PVC, readable by anyone who can
+  `kubectl exec`/`cp` into that namespace. Credentials, API keys, and
+  tokens must come from an existing Secret via `secretKeyRef`, the same
+  mechanism `backend.postgres.*` and `backend.adminSecretName` already
+  use — not be hardcoded in the app source you `kubectl cp` onto the pod.
+- **TLS is handled by the runtime; application-layer auth is not.**
+  `ingress.tls.enabled` + cert-manager gets you HTTPS and the
+  `force-https` redirect — that's transport security, not authentication.
+  Every endpoint that reads or writes user data, or performs a privileged
+  action, needs its own explicit authn/authz check in application code;
+  this chart implies no default protection on any route beyond the
+  admin-Basic-Auth pattern above.
+- **Open-by-design is only acceptable for genuinely public, non-destructive
+  endpoints** — read-only data with no PII, or a create action explicitly
+  meant to be anonymous and public. Anything that deletes data, modifies
+  something another user owns, or manages/configures the system needs
+  authentication and an authorization check, full stop.
+
+### 3. Never copy, push, or commit credentials
+
+Treat any kubeconfig, access token, password, username, API key, private
+key/certificate, or connection string as radioactive — it must never travel
+through any of the three channels this workflow relies on:
+
+- **Never `kubectl cp` it onto a pod.** A kubeconfig (or any cluster
+  credential) copied into `/app` or `/usr/share/nginx/html` grants
+  whole-cluster access to anyone who can `kubectl exec`/`cp` into that
+  namespace — worse than an ordinary leak, since the pod itself becomes a
+  path back into the cluster that created it. Before every `kubectl cp`,
+  check the source directory doesn't contain `.env`, `kubeconfig*.yaml`,
+  `*.pem`, `id_rsa*`, `.git`, or anything else that isn't meant to run
+  inside the container.
+- **Never `git commit`/`git push` it** — in this chart repo, in an app repo
+  built on it, or in a commit message/PR description. This applies even to
+  a private repo: history is forever, and repos have a habit of becoming
+  public or getting forked later. `.gitignore` local secrets
+  (`kubeconfig.yaml`, `.env`, `*.token`) proactively, and before staging a
+  broad change (`git add -A`/`git add .`), review `git status`/`git diff`
+  for anything that shouldn't be there — a credential can hide behind an
+  innocuous-looking filename.
+- **Never paste it into logs, chat, issues, or this chart's own values.**
+  `values.yaml`/`-f my-values.yaml` should hold Secret *names* and *key
+  names* (`backend.postgres.secretName`, `backend.postgres.secretKeys.*`),
+  never the credential values themselves — those belong only inside the
+  Kubernetes Secret object, created out-of-band
+  (`kubectl create secret generic ...`) and referenced by name.
+- **A kubeconfig for this cluster is itself sensitive data**, full stop —
+  it typically grants far more than "deploy this one app." Treat it exactly
+  like the database password or admin token it can be used to read.
+
+### 4. Test in a controlled environment before production
+
+Before releasing any change to a production deployment of this runtime,
+test it in a separate, non-production install first — a different
+namespace, cluster, or `values.yaml` pointed at throwaway infrastructure
+(the Quickstart's `demo` namespace is exactly this pattern). At minimum,
+verify:
+
+- **Functionality** — the feature does what it's supposed to, including
+  edge cases and error paths, not just the happy path exercised while
+  writing it.
+- **Security** — every guardrail above actually holds under test: auth/authz
+  is enforced and actually reachable (not just present somewhere in code),
+  no secrets leaked into code/logs/commits, no state living somewhere it
+  shouldn't (Guardrails 1–3).
+- **Scale** — the app behaves under realistic load and data volume, not
+  just a single manual click-through. This runtime doesn't horizontally
+  scale past one replica per component (see **Trade-offs & constraints**) —
+  know that ceiling before hitting it in production.
+- **Anything else specific to the change** — a database migration, a new
+  external dependency, a new Ingress path — deserves its own explicit
+  check, not just the three above.
+
+A `kubectl cp` deploy is fast and easy to iterate on, but that speed is not
+a substitute for testing. Use it to iterate quickly *in* the test
+environment — not to skip testing before promoting to production.
+
 ## Why this shape
 
 Two real constraints this design is built around:
@@ -327,3 +463,33 @@ kubectl label <kind> <name> app.kubernetes.io/managed-by=Helm
 (This is not needed for the PVCs after an `helm uninstall` — see
 **Persistence & lifecycle**; their ownership annotations already survive
 intact.)
+
+## Disclaimer
+
+This chart is licensed under the Apache License, Version 2.0 (see
+`LICENSE`). That License already disclaims all warranties (§7, "Disclaimer
+of Warranty"), limits Contributor liability (§8, "Limitation of
+Liability"), and states that **You** are solely responsible for
+determining the appropriateness of using the Work and assume any risks
+from exercising permissions under it. Nothing in this section narrows,
+replaces, or otherwise conflicts with those terms — it restates them in
+plain language and extends them explicitly to this runtime's agent-driven
+deployment model, which the License doesn't speak to by name. Where
+anything below reads differently from `LICENSE`, the License text governs.
+
+Using this software — deploying it, running it, or building on top of
+it — is entirely at the user's own risk, with no warranty of any kind.
+
+The user of this software is responsible at all times for how it is
+used — whether that use is direct (someone running `helm install`/`kubectl
+cp` themselves) or indirect (instructing an AI agent, script, CI job, or
+any other automation to perform those actions on their behalf), and
+regardless of how many layers of tooling, dependencies, or transitive calls
+sit between the user's instruction and the action actually taken against a
+cluster. Delegating an action to an agent, a script, or a dependency does
+not transfer or reduce that responsibility.
+
+This applies in full to the **Guardrails** above: following them reduces
+risk, but does not shift responsibility for data protection, security,
+credential handling, or production-readiness away from whoever is
+operating this software.
