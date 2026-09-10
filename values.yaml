@@ -6,7 +6,7 @@ ingress:
   # Public hostname this site is served on. Used by both the plain-HTTP
   # redirect-to-https Ingress and the TLS Ingress, and by nginx's
   # `server_name` (via files/default.conf, templated at deploy time).
-  host: no.container.softwaredam.nl
+  host: softwaredam-example.com
   className: traefik
   tls:
     enabled: true
@@ -81,7 +81,7 @@ backend:
   postgres:
     enabled: true
     # Name of the existing Secret providing the connection details.
-    secretName: no-container-postgres-tst
+    secretName: full-stack-app
     # Keys inside that Secret. These match CloudNativePG's default
     # connection Secret — override per key if yours uses different names.
     secretKeys:
